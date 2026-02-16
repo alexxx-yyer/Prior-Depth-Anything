@@ -72,7 +72,7 @@ def create_and_execute():
         type=str,
         default='linear',
         help=(
-            "The mode to fill in the vacancy in the prior. Only works for `pattern='^downscale_\d*$'`. "
+            "The mode to fill in the vacancy in the prior. Only works for `pattern='^downsample_\d*$'`. "
             "Choices=('knn', 'global', 'linear')"
         )
     )

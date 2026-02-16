@@ -144,6 +144,14 @@ class DepthCompletion(torch.nn.Module):
         
         output = {}
         
+        # ================================== None pattern: no prior, return raw MDE prediction.
+        if pattern == 'none':
+            output['global_preds'] = pred_disparities.clone()
+            output['scaled_preds'] = pred_disparities.clone()
+            if self.args.extra_condition == 'error':
+                output['uncertainties'] = torch.zeros_like(pred_disparities)
+            return output
+        
         # The masks denote the areas to be completed. Exclude the sparse points to accelerate.
         complete_masks = torch.ones_like(sparse_masks).to(torch.bool)
         complete_masks[sparse_masks] = False
@@ -189,7 +197,7 @@ class DepthCompletion(torch.nn.Module):
             warnings.warn(
                 "The depth prior is directly provided by the user. All the known points will cover the knn-scaled map.")
         else:
-            assert not re.fullmatch(r'^cubic_\d+$', pattern)
+            assert not re.fullmatch(r'^mask_\d+$', pattern)
             assert not re.fullmatch(r'^distance_\d+_\d+$', pattern)
         if ret == 'knn':
             return scaled_preds

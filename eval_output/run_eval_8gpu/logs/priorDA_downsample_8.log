@@ -1,0 +1,10 @@
+Loading pretrained fmde from ../pretrained/Prior-Depth-Anything/depth_anything_v2_vitb.pth...
+Freezing the decoder now.
+Freezing the encoder now.
+Loading checkpoint from ../pretrained/Prior-Depth-Anything/prior_depth_anything_vitb_1_1.pth...
+Prior-Depth-Anything v1.1 loaded (frozen=vitb, conditioned=vitb)
+Benchmarks:   0%|          | 0/10 [00:00<?, ?it/s]
+NYUv2:   0%|          | 0/654 [00:00<?, ?it/s][A
+                                              [ABenchmarks:   0%|          | 0/10 [00:06<?, ?it/s]
+
+Aborted!

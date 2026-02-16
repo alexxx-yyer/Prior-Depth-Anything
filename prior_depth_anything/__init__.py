@@ -130,7 +130,8 @@ class PriorDepthAnything(nn.Module):
         global_cond = completed_maps['global_preds'].unsqueeze(1)
         
         ##### Fine stage. #####
-        if self.args.normalize_depth:
+        _do_normalize = self.args.normalize_depth and pattern != 'none'
+        if _do_normalize:
             # Obtain the value of norm params.
             masked_min, denom = self.zero_one_normalize(sparse_depths, sparse_masks, affine_only=True)
             
@@ -162,7 +163,7 @@ class PriorDepthAnything(nn.Module):
             self.timer.append(t1 - t0)
             
         metric_depths = disparity2depth(metric_disparities)
-        if self.args.normalize_depth:
+        if _do_normalize:
             metric_depths = metric_depths * denom + masked_min
         return metric_depths
     
@@ -306,7 +307,7 @@ class PriorDepthAnything(nn.Module):
         rgb, prior_depth, sparse_depth = data['rgb'], data['prior_depth'], data['sparse_depth'] # Shape: [B, C, H, W]
         cover_mask, sparse_mask = data['cover_mask'], data['sparse_mask'] # Shape: [B, 1, H, W]
         geometric_depth = data['geometric_depth'] if geometric is not None else None
-        if (sparse_mask.view(sparse_mask.shape[0], -1).sum(dim=1) < self.args.K).any():
+        if pattern != 'none' and (sparse_mask.view(sparse_mask.shape[0], -1).sum(dim=1) < self.args.K).any():
             raise ValueError("There are not enough known points in at least one of samples")
 
         ### The core inference stage.

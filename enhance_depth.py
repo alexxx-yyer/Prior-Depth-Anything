@@ -1,3 +1,5 @@
+import argparse
+import os
 import torch
 import numpy as np
 from vggt.models.vggt import VGGT
@@ -57,24 +59,62 @@ def world_coords_points_to_depth(
         depth_map[depth_map > 1e5] = 0
     return depth_map
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Depth enhancement with VGGT + Prior-Depth-Anything')
+    # VGGT 模型：不传则使用 HuggingFace 默认 "facebook/VGGT-1B"；传本地目录或 hub id 则从该路径加载
+    parser.add_argument('--vggt_path', type=str, default=None,
+                        help='VGGT 模型路径：本地目录或 HuggingFace repo id，默认从 facebook/VGGT-1B 加载')
+    # Prior-Depth-Anything 模型
+    parser.add_argument('--prior_mde_dir', type=str, default=None,
+                        help='Prior-Depth 的 MDE 权重目录，需包含 depth_anything_v2_{size}.pth；不传则从 HF 下载')
+    parser.add_argument('--prior_ckpt_dir', type=str, default=None,
+                        help='Prior-Depth 的 checkpoint 目录，需包含 prior_depth_anything_{size}{postfix}.pth；不传则从 HF 下载')
+    parser.add_argument('--prior_version', type=str, default='1.0', choices=['1.0', '1.1'],
+                        help='Prior-Depth 版本，影响 checkpoint 文件名后缀')
+    parser.add_argument('--prior_frozen_model_size', type=str, default=None,
+                        help='Prior-Depth frozen MDE 尺寸，如 vits/vitb/vitl；不传用默认 vitb')
+    parser.add_argument('--prior_conditioned_model_size', type=str, default=None,
+                        help='Prior-Depth conditioned 模型尺寸，如 vits/vitb/vitl；不传用默认 vitb')
+    # 输入
+    parser.add_argument('--image', type=str, default='assets/sample-4/rgb.jpg',
+                        help='输入 RGB 图像路径')
+    parser.add_argument('--depth', type=str, default='assets/sample-4/gt_depth.png',
+                        help='GT 深度图路径（用于评估）')
+    return parser.parse_args()
+
+
 if __name__ == '__main__':
+    args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # bfloat16 is supported on Ampere GPUs (Compute Capability 8.0+) 
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    
-    # Initialize vggt.
-    print("Initialize VGGT and load the pretrained weights.")
-    vggt = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
+
+    # Initialize VGGT：支持本地路径或 HuggingFace repo id
+    vggt_path = args.vggt_path if args.vggt_path else "facebook/VGGT-1B"
+    print(f"Initialize VGGT and load weights from: {vggt_path}")
+    if vggt_path and os.path.isdir(vggt_path):
+        vggt = VGGT.from_pretrained(vggt_path, local_files_only=True).to(device)
+    else:
+        vggt = VGGT.from_pretrained(vggt_path).to(device)
     print("VGGT loaded!")
 
-    # Initialize prior-depth-anything module.
+    # Initialize prior-depth-anything：支持本地 mde_dir / ckpt_dir
     from prior_depth_anything.plugin import PriorDARefiner, PriorDARefinerMetrics
-    Refiner = PriorDARefiner(device=device, version="1.0", coarse_only=False)
+    refiner_kw = dict(device=device, version=args.prior_version, coarse_only=False)
+    if args.prior_mde_dir is not None:
+        refiner_kw["mde_dir"] = args.prior_mde_dir
+    if args.prior_ckpt_dir is not None:
+        refiner_kw["ckpt_dir"] = args.prior_ckpt_dir
+    if args.prior_frozen_model_size is not None:
+        refiner_kw["frozen_model_size"] = args.prior_frozen_model_size
+    if args.prior_conditioned_model_size is not None:
+        refiner_kw["conditioned_model_size"] = args.prior_conditioned_model_size
+    Refiner = PriorDARefiner(**refiner_kw)
 
     with torch.no_grad():
         ########## Depth-Estimation stage.
-        image_names = ['assets/sample-4/rgb.jpg']
-        depth_name = 'assets/sample-4/gt_depth.png'
+        image_names = [args.image]
+        depth_name = args.depth
         images = load_and_preprocess_images(image_names).to(device)
 
         # Predict attributes including cameras, depth maps, and point maps.

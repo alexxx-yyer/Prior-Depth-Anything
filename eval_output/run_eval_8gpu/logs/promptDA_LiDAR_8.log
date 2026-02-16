@@ -1,0 +1,8 @@
+[1;32m[INFO][0;0m Loading checkpoint from ../pretrained/PromptDA/model.ckpt
+PromptDA loaded from ../pretrained/PromptDA/model.ckpt
+Benchmarks:   0%|          | 0/10 [00:00<?, ?it/s]
+NYUv2:   0%|          | 0/654 [00:00<?, ?it/s][A
+NYUv2:   0%|          | 1/654 [00:01<20:42,  1.90s/it][A
+                                                      [ABenchmarks:   0%|          | 0/10 [00:01<?, ?it/s]
+
+Aborted!

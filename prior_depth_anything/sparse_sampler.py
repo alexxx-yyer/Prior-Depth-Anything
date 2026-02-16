@@ -62,6 +62,7 @@ class SparseSampler:
         if isinstance(image, str):
             if image.endswith('.npy'):
                 np_image = np.load(image)
+                np_image = np.array(np_image, copy=True)
                 ts_image = torch.from_numpy(np_image).permute(2, 0, 1).to(torch.uint8)
             else:
                 pil_image = Image.open(image)
@@ -71,22 +72,22 @@ class SparseSampler:
             np_image = image.cpu().numpy()
             ts_image = image.cpu().permute(2, 0, 1).to(torch.uint8)
         elif isinstance(image, np.ndarray):
-            np_image = image.copy()
-            ts_image = torch.from_numpy(image).permute(2, 0, 1).to(torch.uint8)
+            np_image = np.array(image, copy=True)
+            ts_image = torch.from_numpy(np_image).permute(2, 0, 1).to(torch.uint8)
         data['rgb'] = ts_image.unsqueeze(0)
         
         # Load prior depth.
         if isinstance(prior, str):
             if prior.endswith('.npy'):
                 np_prior = np.load(prior)
-                ts_prior = torch.from_numpy(np_prior)
+                ts_prior = torch.from_numpy(np.array(np_prior, copy=True))
             else:
                 # The format should be compatible with Image.open
                 pil_prior = Image.open(prior)
                 np_prior = np.asarray(pil_prior).astype(np.float32)
                 ts_prior = torch.from_numpy(np_prior.copy())
         elif isinstance(prior, np.ndarray):
-            ts_prior = torch.from_numpy(prior)
+            ts_prior = torch.from_numpy(np.array(prior, copy=True))
         elif isinstance(prior, torch.Tensor):
             ts_prior = prior.cpu()
         data['prior_depth'] = ts_prior.unsqueeze(0).unsqueeze(0)
@@ -136,22 +137,77 @@ class SparseSampler:
         data['cover_mask'] = cover_mask.unsqueeze(0).unsqueeze(0)
         
         # Check samples and move points to the target device.
-        if sparse_mask.sum() < K:
+        if pattern != 'none' and sparse_mask.sum() < K:
             raise ValueError("There are not enough known points.")
         data = {k: v.to(self.device) for k, v in data.items() if v is not None}
         return data
     
+    def _get_mixed_sparse_depth(self, image, prior, pattern, down_fill_mode='linear'):
+        """Handle mixed patterns connected by '+', e.g. 'mask_160+LiDAR_8'."""
+        height, width = image.shape[:2]
+        sub_patterns = [p.strip() for p in pattern.split('+')]
+
+        # Classify sub-patterns into three categories
+        mask_patterns = []       # mask_N, distance_L_H  — "dig holes" in prior
+        sparse_patterns = []     # LiDAR_N, sift, orb, digit — sparse sampling
+        down_patterns = []       # downsample_N — low-res grid
+
+        for p in sub_patterns:
+            if re.fullmatch(r'^mask_\d+$', p) or re.fullmatch(r'^distance_\d+_\d+$', p):
+                mask_patterns.append(p)
+            elif re.fullmatch(r'^downsample_\d+$', p):
+                down_patterns.append(p)
+            else:
+                sparse_patterns.append(p)
+
+        # Step 1: Apply mask patterns — dig holes in the prior depth
+        cover_mask = prior > self.min_depth          # initial: all valid pixels
+        masked_prior = prior.clone()
+        for mp in mask_patterns:
+            _, _, cm = self.get_sparse_depth(image, prior, pattern=mp)
+            # cm marks the "kept" (non-masked) valid region
+            cover_mask = cm
+            masked_prior = prior * cover_mask.type_as(prior)
+
+        # Step 2: Sample sparse / downsample points from the masked prior
+        combined_sparse = torch.zeros((height, width), dtype=torch.float32)
+        combined_smask = torch.zeros((height, width), dtype=torch.bool)
+
+        for sp in sparse_patterns:
+            sd, sm, _ = self.get_sparse_depth(image, masked_prior, pattern=sp)
+            combined_sparse = torch.where(sm, sd, combined_sparse)
+            combined_smask |= sm
+
+        for dp in down_patterns:
+            sd, sm, _ = self.get_sparse_depth(
+                image, masked_prior, pattern=dp, down_fill_mode=down_fill_mode
+            )
+            combined_sparse = torch.where(sm, sd, combined_sparse)
+            combined_smask |= sm
+
+        return combined_sparse, combined_smask, cover_mask
+
     def get_sparse_depth(self, image, prior, pattern=None, down_fill_mode='linear'):
         height, width, c = image.shape[-3:]
         low_height, low_width = prior.shape[-2:]
         
+        # --- Mixed pattern support: split by '+' and dispatch ---
+        if pattern and '+' in pattern:
+            return self._get_mixed_sparse_depth(image, prior, pattern, down_fill_mode)
+        
         if height != low_height or width != low_width:
-            pattern = 'downscale_'
+            pattern = 'downsample_'
             # print("============================ Testing with known low depth. ============================")
         # else:
         #     print(f"============================ Testing with {pattern}. ============================")
         
-        if pattern.isdigit():
+        if pattern == 'none':
+            # No prior: return all-zero sparse depth (pure monocular depth estimation)
+            sparse_depth = torch.zeros((height, width), dtype=torch.float32)
+            sparse_mask = torch.zeros((height, width), dtype=torch.bool)
+            cover_mask = torch.zeros((height, width), dtype=torch.bool)
+            
+        elif pattern.isdigit():
             # Adapted from OMNI-DC, available at https://github.com/princeton-vl/OMNI-DC
             num_sample = int(pattern)
             
@@ -171,10 +227,10 @@ class SparseSampler:
             sparse_depth = prior * sparse_mask.type_as(prior)
             cover_mask = torch.zeros_like(sparse_mask)
             
-        elif re.fullmatch(r'^downscale_\d*$', pattern):
+        elif re.fullmatch(r'^downsample_\d*$', pattern):
             prior = prior.unsqueeze(0)
             
-            if pattern != 'downscale_':
+            if pattern != 'downsample_':
                 prior_mask = prior > self.min_depth
                 
                 factor = pattern.split("_")[-1]
@@ -222,21 +278,21 @@ class SparseSampler:
             
             sparse_mask = sparse_depth > self.min_depth
             # Filter the sparse mask with valid mask if sampled manually.
-            if pattern != 'downscale_': sparse_mask &= prior_mask.squeeze(0)
+            if pattern != 'downsample_': sparse_mask &= prior_mask.squeeze(0)
             sparse_depth = sparse_depth * sparse_mask.type_as(sparse_depth)
             cover_mask = torch.zeros_like(sparse_mask)
             
-        elif re.fullmatch(r'^cubic_\d+$', pattern):
+        elif re.fullmatch(r'^mask_\d+$', pattern):
             clen = pattern.split('_')[-1]
             clen = int(clen)
             
             # Sample a cube in the image based on top-lerf coords and clen
-            cubic_mask = torch.ones_like(prior, dtype=torch.bool)
+            mask_region = torch.ones_like(prior, dtype=torch.bool)
             height_upper, width_upper = height - clen, width - clen
             h = np.random.randint(0, height_upper)
             w = np.random.randint(0, width_upper)
-            cubic_mask[h : h+clen, w : w+clen] = False
-            cover_mask = torch.logical_and(cubic_mask, prior > self.min_depth)
+            mask_region[h : h+clen, w : w+clen] = False
+            cover_mask = torch.logical_and(mask_region, prior > self.min_depth)
             
             vacant_depth = prior * cover_mask.type_as(prior)
             sparse_depth, sparse_mask, _ = self.get_sparse_depth(image, vacant_depth, pattern='2000')
@@ -341,8 +397,8 @@ class SparseSampler:
         else:
             raise NotImplementedError((
                 "'pattern' should be in format of ['^LiDAR_\d+$', 'sift', "
-                "'orb', '^cubic_\d+$', '^distance_\d+_\d+$'," 
-                "'^downscale_\d*$', '(int)'], but the provided 'pattern' is -- '{}'".format(pattern)
+                "'orb', '^mask_\d+$', '^distance_\d+_\d+$'," 
+                "'^downsample_\d*$', '(int)'], but the provided 'pattern' is -- '{}'".format(pattern)
             ))
         
         return sparse_depth, sparse_mask, cover_mask

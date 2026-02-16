@@ -1,3 +1,4 @@
+import os
 import torch
 import argparse
 from . import PriorDepthAnything
@@ -76,6 +77,21 @@ def create_and_execute():
             "Choices=('knn', 'global', 'linear')"
         )
     )
+    ## Pretrained model paths (optional). If not set, models are downloaded from HuggingFace.
+    test_parser.add_argument(
+        "--pretrained",
+        "--ckpt_dir",
+        dest="ckpt_dir",
+        type=str,
+        default=None,
+        help="Path to prior_depth_anything checkpoint: .pth file or directory. If not set, download from HuggingFace."
+    )
+    test_parser.add_argument(
+        "--mde_dir",
+        type=str,
+        default=None,
+        help="Path to Depth Anything V2 weights: a .pth file or directory. If not set, download from HuggingFace."
+    )
     test_parser.set_defaults(func=test)
     
     args = parser.parse_args()
@@ -89,7 +105,9 @@ def test(args):
         device=device, 
         coarse_only=args.coarse_only,
         frozen_model_size=args.frozen_model_size,
-        conditioned_model_size=args.conditioned_model_size
+        conditioned_model_size=args.conditioned_model_size,
+        ckpt_dir=args.ckpt_dir,
+        mde_dir=args.mde_dir
     ) 
     
     """

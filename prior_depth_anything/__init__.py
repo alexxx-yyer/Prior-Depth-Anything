@@ -10,7 +10,6 @@ import glob
 from typing import Union, Optional
 import time
 
-from .depth_anything_v2 import build_backbone
 from .depth_completion import DepthCompletion
 from .sparse_sampler import SparseSampler
 from .utils import (
@@ -52,33 +51,28 @@ class PriorDepthAnything(nn.Module):
         if conditioned_model_size:
             self.args.conditioned_model_size = conditioned_model_size
         
-        ## Frozon MDE loading.
-        if self.args.frozen_model_size in ['vitg']:
-            raise ValueError(f'{self.args.frozen_model_size} coming soon...')
-        fmde_name = f'depth_anything_v2_{self.args.frozen_model_size}.pth' # Download model checkpoints
+        ## Frozen MDE loading (MoGe).
+        # mde_dir can be a HuggingFace repo ID (e.g. "Ruicheng/moge-vitl")
+        # or a local path to model.pt
         if mde_dir is None:
-            fmde_path = hf_hub_download(repo_id=self.args.repo_name, filename=fmde_name)
+            fmde_path = "Ruicheng/moge-vitl"  # Default HuggingFace MoGe model
         else:
-            fmde_path = os.path.join(mde_dir, fmde_name)
-        print(f"Loading pretrained fmde from {fmde_path}...")
+            fmde_path = mde_dir
         
-        # Initialize Frozon-MDE.
+        # Initialize MoGe-based depth completion.
         self.completion = DepthCompletion.build(args=self.args, fmde_path=fmde_path, device=device)
         
-        ## Conditioned MDE loading.
+        ## Conditioned MDE loading (Fine stage; depth_anything_v2 copied from Prior-Depth-Anything).
         if not coarse_only:
-            if self.args.conditioned_model_size in ['vitl', 'vitg']:
-                raise ValueError(f'{self.args.conditioned_model_size} coming soon...')
-        
-            # Initialize and load preptrained `prior-depth-anything` models.
+            from prior_depth_anything.depth_anything_v2 import build_backbone
+
             model = build_backbone(
-                depth_size=self.args.conditioned_model_size, 
+                depth_size=self.args.conditioned_model_size,
                 encoder_cond_dim=3
             )
             model.construct_aux_layers()
-
             self.model = self.load_checkpoints(model, ckpt_dir, postfix, self.device).eval()
-            
+        
         self.sampler = SparseSampler(device=device, completion=self.completion)
     
     def load_checkpoints(self, model, ckpt_dir, postfix='', device='cuda:0'):
@@ -86,7 +80,8 @@ class PriorDepthAnything(nn.Module):
         if ckpt_dir is None:
             ckpt_path = hf_hub_download(repo_id=self.args.repo_name, filename=ckpt_name)
         else:
-            ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+            # Support direct .pth file path or directory
+            ckpt_path = ckpt_dir if os.path.isfile(ckpt_dir) else os.path.join(ckpt_dir, ckpt_name)
         print(f"Loading checkpoint from {ckpt_path}...")
         
         state_dict = torch.load(ckpt_path, map_location='cpu')
@@ -125,6 +120,16 @@ class PriorDepthAnything(nn.Module):
         comp_cond = completed_maps['scaled_preds'].unsqueeze(1)
         if self.coarse_only:
             coarse_depths = disparity2depth(comp_cond)
+            # In coarse_only mode there is no fine-stage neural network
+            # whose bounded output (ReLU) naturally prevents extreme depth.
+            # Clamp the output depth using sparse depth statistics to
+            # replicate that bounding effect.
+            valid_sparse = sparse_depths[sparse_depths > 0]
+            if valid_sparse.numel() > 0:
+                max_depth_cap = valid_sparse.max() * 3.0
+            else:
+                max_depth_cap = 1000.0
+            coarse_depths = coarse_depths.clamp(min=0.0, max=max_depth_cap)
             return coarse_depths
         # Global Scale-Shift aligned depths.
         global_cond = completed_maps['global_preds'].unsqueeze(1)

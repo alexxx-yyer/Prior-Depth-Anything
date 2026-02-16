@@ -212,62 +212,42 @@ class DepthCompletion(torch.nn.Module):
         return output
         
     def init_depth_model(self, fmde_path):
-        """ We implement @depth-anything-v2 here, you can replace it with other depth estimation models. (like VGGT or moge ...)"""
-        from .depth_anything_v2 import build_backbone
-        depth_model = build_backbone(
-            depth_size=self.args.frozen_model_size
-        )
-        state_dict = torch.load(fmde_path, map_location='cpu')
-        depth_model.load_state_dict(state_dict=state_dict)
-        
-        depth_model.construct_aux_layers()
-        depth_model.freeze_network({'encoder', 'decoder'})
-        depth_model = depth_model.eval().to(self.device)
-        
-        return depth_model
+        """ We use MoGe as the frozen MDE backbone. """
+        import torch.nn.functional as F
 
-        """
-        ### For VGGT: (Please also modify the call.)
-        from vggt.models.vggt import VGGT
-        from .depth_anything_v2.util.transform import Resize
+        from .MoGe.moge.model.v2 import MoGeModel
 
-        # Initialize vggt.
-        print("Initialize VGGT and load the pretrained weights.")
-        vggt = VGGT.from_pretrained("facebook/VGGT-1B")
-        vggt = vggt.to(self.device).eval()
-        
+        print(f"Loading MoGe from {fmde_path}...")
+        moge = MoGeModel.from_pretrained(fmde_path)
+        moge = moge.eval().to(self.device)
+        print("MoGe loaded!")
+
         @torch.no_grad()
-        def depth_model(images, input_size=518):
-            images = images.to(torch.float32) / 255.0
+        def depth_model(images, input_size=518, device='cuda:0'):
+            # images: [B, 3, H, W] uint8
             oh, ow = images.shape[-2:]
-            images = Resize(
-                width=input_size,
-                height=input_size,
-                resize_target=False,
-                keep_aspect_ratio=True,
-                ensure_multiple_of=14,
-                resize_method='lower_bound',
-                image_interpolation_method='bicubic',
-            )({'image': images})['image']
+            images_float = images.to(torch.float32).to(device) / 255.0
 
-            dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-            
-            with torch.cuda.amp.autocast(dtype=dtype):
-                images = images[None]  # add batch dimension
-                aggregated_tokens_list, ps_idx = vggt.aggregator(images)
-            # Predict Depth Maps
-            depth_map, depth_conf = vggt.depth_head(aggregated_tokens_list, images, ps_idx)
-            import torch.nn.functional as F
-            depths = F.interpolate(
-                depth_map.squeeze(-1), size=(oh, ow), mode='bilinear', align_corners=True
-            ).squeeze(1)
-            disparities = depth2disparity(depths)
-            
+            output = moge.infer(images_float, apply_mask=False)
+            depth = output['depth']  # [B, H, W]
+            mask = output.get('mask', None)  # [B, H, W] bool – valid region
+
+            # Resize to original size if needed
+            if depth.shape[-2] != oh or depth.shape[-1] != ow:
+                depth = F.interpolate(
+                    depth[:, None], size=(oh, ow),
+                    mode='bilinear', align_corners=True
+                ).squeeze(1)
+                if mask is not None:
+                    mask = F.interpolate(
+                        mask[:, None].float(), size=(oh, ow),
+                        mode='nearest'
+                    ).squeeze(1) > 0.5
+
+            disparities = depth2disparity(depth)
             return disparities
-        print("VGGT loaded!")
+
         return depth_model
-        
-        """
     
     def calc_scale_shift(self, 
         k_sparse_targets: torch.Tensor, 
